@@ -168,8 +168,8 @@
     <!-- Mode 0 — marker feedback -->
     <div class="panel active" id="panel0">
       <div class="slider">
-        <div class="head"><span>Marker-Schwelle</span><b id="cutoffVal">17</b></div>
-        <input type="range" id="cutoff" min="0" max="50" step="1" value="17">
+        <div class="head"><span>Marker-Schwelle</span><b id="cutoffVal">10</b></div>
+        <input type="range" id="cutoff" min="0" max="14" step="1" value="10">
       </div>
       <div class="slider">
         <div class="head"><span>Schritt-Fenster</span><b id="markerWinVal">8 Schritte</b></div>
@@ -276,7 +276,7 @@ const state = {
   feedbackOn: true,
   // Settings mirrored across all connected clips. Seeded from the first
   // clip's own persisted values when it connects (see hydrate()).
-  cutoff: 17,
+  cutoff: 10,
   window: 8,
   refractory: 1,
   // Schlurf-/Festinations-Erkennung im Clip. Nicht persistent, überlebt aber
@@ -951,9 +951,7 @@ const pushBpm       = debounce(async v => {
 // visible reason why. Clamps state.cutoff to the new ceiling; the caller
 // pushes it if it moved.
 function applyWindowBounds() {
-  // Fuzzy scoring (src/gait/marker.h): n-1 pairs x 3 channels x up to 2
-  // points, plus 1 per forefoot step in the window = 7n-6 (50 at n=8).
-  const max = 7 * state.window - 6;
+  const max = 2 * (state.window - 1);
   $('cutoff').max = max;
   if (state.cutoff > max) state.cutoff = max;
   return max;
