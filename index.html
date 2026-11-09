@@ -168,8 +168,8 @@
     <!-- Mode 0 — marker feedback -->
     <div class="panel active" id="panel0">
       <div class="slider">
-        <div class="head"><span>Marker-Schwelle</span><b id="cutoffVal">10</b></div>
-        <input type="range" id="cutoff" min="0" max="14" step="1" value="10">
+        <div class="head"><span>Marker-Schwelle</span><b id="cutoffVal">17</b></div>
+        <input type="range" id="cutoff" min="0" max="50" step="1" value="17">
       </div>
       <div class="slider">
         <div class="head"><span>Schritt-Fenster</span><b id="markerWinVal">8 Schritte</b></div>
@@ -239,13 +239,13 @@
   <div class="row">
     <div class="tile"><div class="lbl">Länge</div><div class="val" id="curLen">–</div><div class="sub">letzte 20: <span id="statLen">–</span></div></div>
     <div class="tile"><div class="lbl">Höhe</div><div class="val" id="curH">–</div><div class="sub">letzte 20: <span id="statH">–</span></div></div>
-    <div class="tile"><div class="lbl">Flex</div><div class="val" id="curFlex">–</div><div class="sub">letzte 20: <span id="statFlex">–</span></div></div>
+    <div class="tile"><div class="lbl">Flex-Umfang</div><div class="val" id="curFlex">–</div><div class="sub">letzte 20: <span id="statFlex">–</span></div></div>
     <div class="tile"><div class="lbl">Marker</div><div class="val" id="curMarker">–</div><div class="sub">Vibrationen: <span id="vibCount">0</span></div></div>
   </div>
   <div class="charts">
     <div class="chart-wrap"><div class="title">Schrittlänge (cm)</div><div class="last" id="lastLen" style="color:var(--len)"></div><canvas id="cLen"></canvas></div>
     <div class="chart-wrap"><div class="title">Höhe (cm)</div><div class="last" id="lastH" style="color:var(--h)"></div><canvas id="cH"></canvas></div>
-    <div class="chart-wrap"><div class="title">Flex (°)</div><div class="last" id="lastFlex" style="color:var(--flex)"></div><canvas id="cFlex"></canvas></div>
+    <div class="chart-wrap"><div class="title">Flex-Umfang (°)</div><div class="last" id="lastFlex" style="color:var(--flex)"></div><canvas id="cFlex"></canvas></div>
     <div class="chart-wrap"><div class="title">Marker</div><div class="last" id="lastMarker" style="color:var(--marker)"></div><canvas id="cMarker"></canvas></div>
   </div>
 </main>
@@ -276,7 +276,7 @@ const state = {
   feedbackOn: true,
   // Settings mirrored across all connected clips. Seeded from the first
   // clip's own persisted values when it connects (see hydrate()).
-  cutoff: 10,
+  cutoff: 17,
   window: 8,
   refractory: 1,
   // Schlurf-/Festinations-Erkennung im Clip. Nicht persistent, überlebt aber
@@ -325,7 +325,7 @@ async function sendCmd(clip, cmd, ack) {
 
 const broadcast = cmd => Promise.all(state.clips.map(c => sendCmd(c, cmd)));
 
-// "SR M0 C10 V07 B060 W8 R1 G1 F1" — fixed offsets, see src/comms/ble.h.
+// "SR M0 C10 V07 B060 W8 R1 G1 F1 A1" — fixed offsets, see src/comms/ble.h.
 //
 // The trailing fields were appended after clips had already been flashed, so
 // a status that stops short is an older firmware, not a corrupt read: fall
@@ -351,6 +351,13 @@ function parseStatus(s) {
     // Schlurf-Erkennung. Fehlt bei älterer Firmware, und dort lief sie
     // immer — "1" ist deshalb der richtige Rückfallwert, nicht "0".
     shuffle:    s.length >= 30 ? (s[29] === '1' ? 1 : 0) : 1,
+    // Faehigkeitsmeldung wie ownBeat: "1" heisst, das F-Feld des
+    // Schritt-Frames ist der Flex-UMFANG. Fehlt sie, steht dort noch die
+    // Spitzen-Plantarflexion — in denselben drei Ziffern, der Frame sagt es
+    // nicht. Rueckfallwert deshalb 0: die alte Bedeutung annehmen und sie
+    // benennen (s. renderClips), statt stillschweigend das Neue zu
+    // unterstellen und eine Spitze als Umfang zu plotten.
+    swingRange: s.length >= 33 ? (s[32] === '1' ? 1 : 0) : 0,
   };
   return Object.values(st).some(v => typeof v === 'number' && Number.isNaN(v)) ? null : st;
 }
@@ -392,6 +399,7 @@ async function connect() {
       steps: [], lastSeq: -1, vibCount: 0, cutoff: state.cutoff, block: null,
       batt: null,       // Akku in %, aus dem Heartbeat-Frame (null = unbekannt)
       ownBeat: false,   // kann den Takt selbst stellen — aus hydrate()
+      swingRange: false, // F-Feld ist der Flex-Umfang — aus hydrate()
       pulsePending: false,  // nur auf dem Fallback-Pfad, s. pulseBeat()
       lagMs: null,      // Schätzung der halben Umlaufzeit, s. timedWrite()
     };
@@ -441,6 +449,7 @@ async function connect() {
 async function hydrate(clip) {
   const st = await readStatus(clip);
   clip.ownBeat = st?.ownBeat === 1;
+  clip.swingRange = st?.swingRange === 1;
   if (st && state.clips.length === 1) {
     state.cutoff     = st.cutoff;
     state.window     = st.window;
@@ -504,13 +513,16 @@ function parseStep(s) {
   if (s.length < 20 || s[0] !== 'L') return null;
   const len = parseInt(s.substring(1, 4), 10);
   const h   = parseInt(s.substring(5, 8), 10);  // sign included at idx 5
-  const flex = parseInt(s.substring(9, 12), 10);
+  // Flex-Umfang (max - min ueber die Schwungphase), nicht die Spitze: siehe
+  // das A-Feld im Read-Wort. Bei einem Clip mit aelterer Firmware steht hier
+  // weiter die Spitze, und renderClips sagt das dann auch.
+  const range = parseInt(s.substring(9, 12), 10);
   const marker = parseInt(s.substring(13, 15), 10);
   const vib = s.charCodeAt(16) === 49 /* '1' */;
   const seq = parseInt(s.substring(18, 20), 10);
-  if (Number.isNaN(len) || Number.isNaN(h) || Number.isNaN(flex)
+  if (Number.isNaN(len) || Number.isNaN(h) || Number.isNaN(range)
       || Number.isNaN(marker) || Number.isNaN(seq)) return null;
-  return { len, h, flex, marker, vib, seq, t: Date.now() };
+  return { len, h, range, marker, vib, seq, t: Date.now() };
 }
 
 // Bit values from SuppressReason in src/gait/marker.h. The clip reports a
@@ -525,7 +537,12 @@ const BLOCK_REASONS = [
   [0x08, 'Refraktärzeit'],
   [0x10, 'Kurvenlaufen'],
   [0x20, 'Ausreißer-Schritt'],
-  [0x40, 'Schwankung Kontaktwinkel'],
+  // Heisst in der Firmware weiter SUPPRESS_VARIATION_FLEX und behaelt seinen
+  // Wert 0x40 — geprueft wird damit aber seit dem 2026-09-25 der
+  // Flex-UMFANG, nicht die Spitze und erst recht kein Kontaktwinkel. Der
+  // Name im Protokoll ist bewusst eingefroren (src/gait/marker.h), die
+  // Beschriftung hier war dadurch schlicht falsch.
+  [0x40, 'Schwankung Flex-Umfang'],
 ];
 
 // Bit 7 of the S field, and the only bit in it that does not name a
@@ -675,7 +692,7 @@ const REC_BLOCK_WAIT_MS = 250;
 // Bedeutung steht in tools/README.md.
 const REC_COLUMNS = [
   'timestamp', 't_ms', 'side', 'seq',
-  'stride_length_cm', 'height_cm', 'flexion_deg',
+  'stride_length_cm', 'height_cm', 'swing_range_deg',
   'marker_count', 'marker_cutoff',
   'vibration_enabled', 'vibration_output', 'festination',
   'lock_refractory', 'lock_stair', 'lock_curve',
@@ -728,7 +745,7 @@ function recOnStep(clip, step) {
     seq:               step.seq,
     stride_length_cm:  step.len,
     height_cm:         step.h,
-    flexion_deg:       step.flex,
+    swing_range_deg:   step.range,
     marker_count:      step.marker,
     marker_cutoff:     clip.cutoff,
     // "Vibration aktiviert" = der Clip steht in einem Modus, in dem die
@@ -934,7 +951,9 @@ const pushBpm       = debounce(async v => {
 // visible reason why. Clamps state.cutoff to the new ceiling; the caller
 // pushes it if it moved.
 function applyWindowBounds() {
-  const max = 2 * (state.window - 1);
+  // Fuzzy scoring (src/gait/marker.h): n-1 pairs x 3 channels x up to 2
+  // points, plus 1 per forefoot step in the window = 7n-6 (50 at n=8).
+  const max = 7 * state.window - 6;
   $('cutoff').max = max;
   if (state.cutoff > max) state.cutoff = max;
   return max;
@@ -1322,6 +1341,21 @@ function renderClips() {
     hint.textContent = `Nur eine Seite verbunden — ${only} Schläge bleiben stumm.`;
     box.appendChild(hint);
   }
+  // Ein Clip ohne A-Flag schickt im F-Feld noch die Spitzen-Plantarflexion.
+  // Das sieht aus wie ein Umfang — drei Ziffern in derselben Größenordnung —
+  // und wäre an der Werkbank genau die Verwechslung, wegen der das Feld
+  // überhaupt getauscht wurde. Deshalb benannt statt verschwiegen; es ist
+  // keine Fehlfunktion, nur eine Firmware, die noch zu flashen ist.
+  const stale = state.clips.filter(c => !c.swingRange)
+                           .map(c => (c.side === 'L' ? 'Links' : 'Rechts'));
+  if (stale.length) {
+    const warn = document.createElement('span');
+    warn.className = 'hint';
+    warn.textContent = `${stale.join(' + ')}: ältere Firmware — „Flex-Umfang"`
+      + ' zeigt dort die Spitzen-Plantarflexion, nicht den Umfang.'
+      + ' Neu flashen, dann stimmt die Beschriftung.';
+    box.appendChild(warn);
+  }
   renderLedLegend();
   renderBeatSource();
 }
@@ -1414,18 +1448,18 @@ function render() {
 
   const lens = steps.map(s => s.len);
   const hs   = steps.map(s => s.h);
-  const fxs  = steps.map(s => s.flex);
+  const fxs  = steps.map(s => s.range);
   const mks  = steps.map(s => s.marker);
   const vibs = steps.map(s => s.vib);
 
   if (last) {
     $('curLen').textContent = (last.len/100).toFixed(2) + ' m';
     $('curH').textContent = (last.h >= 0 ? '+' : '') + last.h + ' cm';
-    $('curFlex').textContent = last.flex + '°';
+    $('curFlex').textContent = last.range + '°';
     $('curMarker').textContent = last.marker + (last.vib ? ' ⚡' : '');
     $('lastLen').textContent = last.len + ' cm';
     $('lastH').textContent = (last.h >= 0 ? '+' : '') + last.h + ' cm';
-    $('lastFlex').textContent = last.flex + '°';
+    $('lastFlex').textContent = last.range + '°';
     $('lastMarker').textContent = last.marker + '/14';
     // Threshold comes from the clip's own reported setting, not a constant
     // in this file — it is user-adjustable and restored from flash.
