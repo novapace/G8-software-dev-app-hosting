@@ -1026,8 +1026,8 @@ const BEAT_START_TRIES    = 4;
 // have swapped. Each "GS" is only a REPORT: it arrives late by its own trip
 // through the link, never early, so the firmware collects eight of them,
 // believes the one with the smallest error — the fastest trip — and applies
-// a single correction of at most 10 ms (100 ms for the first window
-// after its start, see settleBeat()). See RHYTHM_SYNC_* in src/config.h.
+// a single correction of at most 10 ms (unlimited for the first windows
+// after a start, see settleBeat()). See RHYTHM_SYNC_* in src/config.h.
 //
 // It used to be one report every 4 s, each acted on at once and by up to
 // 25 ms. That moved the beat by the link's jitter rather than by the drift,
@@ -1137,20 +1137,21 @@ async function armBeat(fresh) {
   await Promise.all(state.clips.map(settleBeat));
 }
 
-// Straight after a hard start: one full window of sync reports, back to
-// back. The start frame is a single trip and measured on hardware it left
-// the two feet up to 80 ms apart, which is felt as a limp (gaps of 830 and
-// 990 ms instead of 909) and took 20 s to creep back. Eight reports in a row
-// let the clip pick the fastest trip and correct once, within about a
-// second of the start instead of after the first regular window.
-const BEAT_SETTLE_FRAMES = 8;   // = RHYTHM_SYNC_WINDOW in src/config.h
+// Straight after a hard start: four windows of sync reports in quick
+// succession. The start frame is a single trip, sent while this page is at
+// its busiest, and recorded on hardware it left a foot 90 ms to several
+// hundred ms off — felt as a limp, or as both feet buzzing together. The
+// firmware takes the whole error out during its first windows after a start
+// (RHYTHM_SYNC_ACQUIRE_WINDOWS in src/config.h); this burst gets it through
+// them in about three seconds instead of half a minute.
+const BEAT_SETTLE_FRAMES = 32;  // = RHYTHM_SYNC_WINDOW × RHYTHM_SYNC_ACQUIRE_WINDOWS
 async function settleBeat(clip) {
   for (let i = 0; i < BEAT_SETTLE_FRAMES; i++) {
     if (!state.rhythmOn) return;
     await armClipBeat(clip, true);
     // Spaced out so the reports ride different connection events — eight in
     // one event would share one trip time and filter nothing.
-    await new Promise(r => setTimeout(r, 60));
+    await new Promise(r => setTimeout(r, 80));
   }
 }
 
