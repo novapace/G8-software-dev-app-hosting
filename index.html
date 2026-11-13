@@ -221,7 +221,7 @@
       <div class="hint" id="beatSource"></div>
       <div class="hint" id="rhythmHint">
         Den Takt stellen die Clips selbst: das Telefon schickt Tempo ("B") und Startphase
-        ("G") und zieht die Phase alle 4 s mit "GS" nach — ein Schlag hängt damit nicht
+        ("G") und meldet die Phase jede Sekunde mit "GS" nach — ein Schlag hängt damit nicht
         mehr an der Laufzeit des Funks. Clips mit älterer Firmware können das nicht; dann
         fällt der ganze Lauf auf einen Write pro Schlag zurück. Fehlt eine Seite, bleibt
         ihr Schlag stumm und das Tempo bleibt korrekt.
@@ -473,7 +473,7 @@ async function hydrate(clip) {
     // has just gone false and the whole run falls back to one write per
     // beat — the "GX" is what stops the other clip's own timer, which
     // would otherwise cue on top of those writes.
-    if (clipTimedBeat()) { await probeLag(clip); await armClipBeat(clip, false); }
+    if (clipTimedBeat()) { await probeLag(clip); await armClipBeat(clip, false); await settleBeat(clip); }
     else await broadcast('GX');
   }
 }
@@ -1012,8 +1012,8 @@ const BEAT_LEAD_MS = 600;
 
 // The start is the run's ONLY hard phase set, and the phase it leaves
 // behind is only as good as its own frame's trip: everything after it moves
-// 25 ms at a time, so a start that lands 300 ms out stays visibly out for a
-// minute or two. So the start frame is repeated until one of them was
+// at most 25 ms per 8 s window, so a start that lands 300 ms out stays
+// visibly out for a minute or two. So the start frame is repeated until one of them was
 // itself a fast trip — at most BEAT_START_TRIES times, since a link that
 // slow will not be cueing anyone well either way.
 const BEAT_START_RETRY_MS = 40;
@@ -1023,13 +1023,18 @@ const BEAT_START_TRIES    = 4;
 //
 // Their clocks are not this one and not each other's, and the error that
 // matters is between the two FEET: once they are half a beat apart they
-// have swapped. The firmware applies only half of each reported error and
-// caps a correction at 25 ms, so the interval is what sets how much clock
-// error the loop can actually track — 25 ms per 4 s is ~6000 ppm, against
-// the ≤250 ppm the beat's clock source is good for. Two 6-byte writes every
-// four seconds is still less traffic than the one-write-per-beat design
-// this replaced.
-const BEAT_RESYNC_MS = 4000;
+// have swapped. Each "GS" is only a REPORT: it arrives late by its own trip
+// through the link, never early, so the firmware collects eight of them,
+// believes the one with the smallest error — the fastest trip — and applies
+// a single correction of at most 5 ms (100 ms while a run is still settling
+// after its start, see settleBeat()). See RHYTHM_SYNC_* in src/config.h.
+//
+// It used to be one report every 4 s, each acted on at once and by up to
+// 25 ms. That moved the beat by the link's jitter rather than by the drift,
+// each foot on its own, and was what made the rhythm feel uneven. One a
+// second gives the filter a window of 8 s; two 6-byte writes per second is
+// still nothing next to the 60 ms status frames coming the other way.
+const BEAT_RESYNC_MS = 1000;
 
 // Tell one clip when its next beat is due, as a delay from now.
 //
@@ -1123,6 +1128,21 @@ async function armBeat(fresh) {
     state.timer = setTimeout(rhythmTick, BEAT_LEAD_MS);
   }
   await Promise.all(state.clips.map(c => armClipBeat(c, false)));
+  await Promise.all(state.clips.map(settleBeat));
+}
+
+// Straight after a hard start: one full window of sync reports, back to
+// back. The start frame is a single trip and measured on hardware it left
+// the two feet up to 80 ms apart, which is felt as a limp (gaps of 830 and
+// 990 ms instead of 909) and took 20 s to creep back. Eight reports in a row
+// let the clip pick the fastest trip and correct once, within about half a
+// second of the start instead of after the first regular window.
+const BEAT_SETTLE_FRAMES = 8;   // = RHYTHM_SYNC_WINDOW in src/config.h
+async function settleBeat(clip) {
+  for (let i = 0; i < BEAT_SETTLE_FRAMES; i++) {
+    if (!state.rhythmOn) return;
+    await armClipBeat(clip, true);
+  }
 }
 
 // The drift correction. Deliberately driven by its own interval rather than
