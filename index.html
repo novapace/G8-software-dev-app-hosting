@@ -309,18 +309,40 @@ const clipBySide = s => state.clips.find(c => c.side === s);
 // acknowledgement itself but because an unacknowledged write returns as
 // soon as it is queued and so cannot be timed — and timing it is the whole
 // point there (see timedWrite()).
-async function sendCmd(clip, cmd, ack) {
-  if (!clip?.ctrlChar) return;
+//
+// ONE WRITE AT A TIME PER CLIP. Web Bluetooth rejects a write issued while
+// another one to the same device is still under way ("GATT operation already
+// in progress"), and the rejection ends in the catch below - the frame is
+// simply gone. Nothing here used to prevent that: stopRhythm() fires "GX"
+// without waiting and setMode() sends "M0" right behind it, so switching
+// from Rhythmus back to Feedback could lose the mode change and leave the
+// clip in Rhythmic with no beat - silent until the switch was toggled. So
+// every write queues behind the previous one for that clip.
+//
+// `droppable` is for the phase-sync reports: they carry a time, a queued one
+// is stale by however long it waited, and the next one is a second away. If
+// anything is pending they are skipped rather than queued.
+function sendCmd(clip, cmd, ack, droppable) {
+  if (!clip?.ctrlChar) return Promise.resolve();
+  if (droppable && clip.writesPending) return Promise.resolve();
   const data = new TextEncoder().encode(cmd);
-  try {
-    if (!ack && clip.ctrlChar.properties.writeWithoutResponse) {
-      await clip.ctrlChar.writeValueWithoutResponse(data);
-    } else {
-      await clip.ctrlChar.writeValue(data);
+  clip.writesPending = (clip.writesPending || 0) + 1;
+  const run = (clip.writeChain || Promise.resolve()).then(async () => {
+    try {
+      if (!clip.ctrlChar) return;
+      if (!ack && clip.ctrlChar.properties.writeWithoutResponse) {
+        await clip.ctrlChar.writeValueWithoutResponse(data);
+      } else {
+        await clip.ctrlChar.writeValue(data);
+      }
+    } catch (e) {
+      console.warn('[ble write]', clip.side, cmd, e.message);
+    } finally {
+      clip.writesPending--;
     }
-  } catch (e) {
-    console.warn('[ble write]', clip.side, cmd, e.message);
-  }
+  });
+  clip.writeChain = run;
+  return run;
 }
 
 const broadcast = cmd => Promise.all(state.clips.map(c => sendCmd(c, cmd)));
@@ -1074,7 +1096,7 @@ function beatFrame(clip, sync) {
 async function armClipBeat(clip, sync) {
   // Sync reports go out unacknowledged: nothing waits for the answer, and
   // an acknowledged write holds the device's GATT queue for a round trip.
-  if (sync) return sendCmd(clip, beatFrame(clip, true));
+  if (sync) return sendCmd(clip, beatFrame(clip, true), false, true);
   // Hard set, repeated until one of the frames was itself a fast trip. Each
   // is recomputed from the anchor, so a retry simply names whatever slot is
   // still far enough out — and lands on the same grid as the other foot.
