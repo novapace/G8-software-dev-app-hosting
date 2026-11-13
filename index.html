@@ -322,22 +322,36 @@ const clipBySide = s => state.clips.find(c => c.side === s);
 // `droppable` is for the phase-sync reports: they carry a time, a queued one
 // is stale by however long it waited, and the next one is a second away. If
 // anything is pending they are skipped rather than queued.
+const WRITE_TIMEOUT_MS = 3000;
 function sendCmd(clip, cmd, ack, droppable) {
   if (!clip?.ctrlChar) return Promise.resolve();
   if (droppable && clip.writesPending) return Promise.resolve();
   const data = new TextEncoder().encode(cmd);
   clip.writesPending = (clip.writesPending || 0) + 1;
   const run = (clip.writeChain || Promise.resolve()).then(async () => {
+    // A write that never settles must not hold up everything queued behind
+    // it: seen on hardware 2026-11-13, one clip kept its beat and took
+    // neither a tempo change nor a stop. So each write gets
+    // WRITE_TIMEOUT_MS, and a clip that does not answer within it is
+    // DISCONNECTED - the clip stops its beat by itself when the link drops,
+    // which is the one stop that needs no write to arrive.
+    let timer;
     try {
       if (!clip.ctrlChar) return;
-      if (!ack && clip.ctrlChar.properties.writeWithoutResponse) {
-        await clip.ctrlChar.writeValueWithoutResponse(data);
-      } else {
-        await clip.ctrlChar.writeValue(data);
-      }
+      const write = (!ack && clip.ctrlChar.properties.writeWithoutResponse)
+        ? clip.ctrlChar.writeValueWithoutResponse(data)
+        : clip.ctrlChar.writeValue(data);
+      const timeout = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error('write timeout')), WRITE_TIMEOUT_MS);
+      });
+      await Promise.race([write, timeout]);
     } catch (e) {
       console.warn('[ble write]', clip.side, cmd, e.message);
+      if (e.message === 'write timeout') {
+        try { clip.device.gatt.disconnect(); } catch (_) {}
+      }
     } finally {
+      clearTimeout(timer);
       clip.writesPending--;
     }
   });
